@@ -75,20 +75,20 @@ module Control.Mp.Eff(
             , operation       -- :: (a -> (b -> Eff e ans)) -> Op a b e ans
 
             -- * Local state
-            , Local           -- Local a e ans
+            -- , Local           -- Local a e ans
 
-            , local           -- :: a -> Eff (Local a :* e) ans -> Eff e ans
-            , localRet        -- :: a -> (ans -> a -> b) -> Eff (Local a :* e) ans -> Eff e b
-            , handlerLocal    -- :: a -> h (Local a :* e) ans -> Eff (h :* e) ans -> Eff e ans
-            , handlerLocalRet -- :: a -> (ans -> a -> b) -> h (Local a :* e) b -> Eff (h :* e) ans -> Eff e b
+            -- , local           -- :: a -> Eff (Local a :* e) ans -> Eff e ans
+            -- , localRet        -- :: a -> (ans -> a -> b) -> Eff (Local a :* e) ans -> Eff e b
+            -- , handlerLocal    -- :: a -> h (Local a :* e) ans -> Eff (h :* e) ans -> Eff e ans
+            -- , handlerLocalRet -- :: a -> (ans -> a -> b) -> h (Local a :* e) b -> Eff (h :* e) ans -> Eff e b
 
-            , lget            -- :: (Local a :? e) => Eff e a
-            , lput            -- :: (Local a :? e) => a -> Eff e ()
-            , lmodify         -- :: (Local a :? e) => (a -> a) -> Eff e ()
+            -- , lget            -- :: (Local a :? e) => Eff e a
+            -- , lput            -- :: (Local a :? e) => a -> Eff e ()
+            -- , lmodify         -- :: (Local a :? e) => (a -> a) -> Eff e ()
 
-            , localGet        -- :: Eff (Local a :* e) a
-            , localPut        -- :: a -> Eff (Local a :* e) ()
-            , localModify     -- :: (a -> a) -> Eff (Local a :* e) a
+            -- , localGet        -- :: Eff (Local a :* e) a
+            -- , localPut        -- :: a -> Eff (Local a :* e) ()
+            -- , localModify     -- :: (a -> a) -> Eff (Local a :* e) a
 
             ) where
 
@@ -208,6 +208,7 @@ under ev@(Ev m h ctx) (Eff eff) = Eff (\_ -> case eff ctx of
 
 resumeUnder :: forall h s a b e e' ans. In h s e => Ev h s e' ans -> (b -> Eff e' a) -> (b -> Eff e a)
 resumeUnder ev@(Ev m h ctx) cont x = under ev (cont x)
+-- resumeUnder ev = ((.) . (.)) under ev ($)
 -- resumeUnder ev@(Ev m h (CCons ev'@(Ev m' h' _) g' ctx')) cont x
 --   = case mmatch m m' of
 --       Just Refl -> under (Ev m h (applyT g' ctx')) (cont x)
@@ -317,25 +318,25 @@ data SubContext (h :: * -> * -> *) s = forall h s e. SubContext !(Context ((h :@
 class In (h :: * -> * -> *) s e where
   subContext :: Context e -> SubContext h s
 
-instance (InEq (HEqual s s') s s' ctx) => In h s ((h' :@ s') :* ctx)  where
+instance (InEq (HEqual (h :: * -> * -> *) s (h' :: * -> * -> *) s') h s h' s' ctx) => In h s ((h' :@ s') :* ctx)  where
   subContext = subContextEq
 
-type family HEqual s s' :: Bool where
-  HEqual s s  = 'True
-  HEqual s s' = 'False
+type family HEqual (h :: * -> * -> *) s (h' :: * -> * -> *) s' :: Bool where
+  HEqual h s h s   = 'True
+  HEqual h s h' s' = 'False
 
-class (iseq ~ HEqual s s') => InEq iseq s s' e  where
+class (iseq ~ HEqual (h :: * -> * -> *) s (h' :: * -> * -> *) s') => InEq iseq h s h' s' e  where
   subContextEq :: Context ((h' :@ s') :* e) -> SubContext h s
 
-instance (s ~ s') => InEq 'True s s' e where
+instance (h ~ h', s ~ s') => InEq 'True h s h' s' e where
   subContextEq ctx = SubContext ctx
 
-instance ('False ~ HEqual s s', In h s e) => InEq 'False s s' e where
+instance ('False ~ HEqual h s h' s', In h s e) => InEq 'False h s h' s' e where
   subContextEq ctx = subContext (ctail ctx)
 
 
 -- {-# INLINE withSubContext #-}
--- withSubContext :: (h :? e) => (SubContext h -> Eff e a) -> Eff e a
+-- withSubContext :: In h s e => (SubContext h s -> Eff e a) -> Eff e a
 -- withSubContext action
 --   = do ctx <- Eff Pure
 --        action (subContext ctx)
