@@ -7,7 +7,8 @@
               ScopedTypeVariables,
               GADTs,
               MultiParamTypeClasses,
-              Rank2Types
+              Rank2Types,
+              AllowAmbiguousTypes
 #-}
 {-|
 Description : Efficient effect handlers based on Evidence Passing Semantics
@@ -55,7 +56,7 @@ module Control.Mp.Eff(
             , runEff          -- :: Eff () a -> a
 
             -- * Effect context
-            , (:?)            -- h :? e,  is h in e?
+            -- , (:?)            -- h :? e,  is h in e?
             , (:*)            -- h :* e,  cons h in front of e
             -- , In           -- alias for :?
 
@@ -107,6 +108,12 @@ import Data.IORef
 -- an abstract marker
 data Marker (h:: * -> * -> *) e a = Marker !Integer
 
+infixr 5 :@
+
+data (h :: * -> * -> *) :@ s
+
+data Ev (h :: * -> * -> *) s e a = Ev (Marker h e a) (h e a) (Context e)
+
 instance Show (Marker h e a) where
   show (Marker i) = show i
 
@@ -134,28 +141,28 @@ freshMarker f
 -------------------------------------------------------
 infixr 5 :*
 
-data (h :: * -> * -> *) :* e
+data hs :* e
 
 data Context e where
-  CCons :: !(Marker h e' ans) -> !(h e' ans) -> !(ContextT e e') -> !(Context e) -> Context (h :* e)
+  CCons :: !(Ev h s e' ans) -> !(ContextT e e') -> !(Context e) -> Context ((h:@s) :* e)
   CNil  :: Context ()
 
 data ContextT e e' where
-  CTCons :: !(Marker h e' ans) -> !(h e' ans) -> !(ContextT e e') -> ContextT e (h :* e)
+  CTCons :: !(Ev h s e' ans) -> !(ContextT e e') -> ContextT e ((h:@s) :* e)
   CTId   :: ContextT e e
   -- CTComp :: ContextT e'' e' -> ContextT e e'' -> ContextT e e'
   -- CTFun :: !(Context e -> Context e') -> ContextT e e'
 
 -- apply a context transformer
 applyT :: ContextT e e' -> Context e -> Context e'
-applyT (CTCons m h g) ctx = CCons m h g ctx
+applyT (CTCons ev g) ctx = CCons ev g ctx
 applyT (CTId) ctx         = ctx
 --applyT (CTComp c1 c2) ctx = applyT c1 (applyT c2 ctx)
 --applyT (CTFun f) ctx = f ctx
 
 -- the tail of a context
 ctail :: Context (h :* e) -> Context e
-ctail (CCons _ _ _ ctx)   = ctx
+ctail (CCons _ _ ctx)   = ctx
 
 -------------------------------------------------------
 -- The Multi Prompt control monad
@@ -164,8 +171,8 @@ ctail (CCons _ _ _ ctx)   = ctx
 -- b  : the result type of the operation
 -------------------------------------------------------
 data Ctl e a = Pure { result :: !a }
-             | forall h b e' ans.
-               Control{ marker :: Marker h e' ans,                    -- prompt marker to yield to (in type context `::ans`)
+             | forall h b e' s ans.
+               Control{ ev     :: Ev h s e' ans,                       -- prompt marker to yield to (in type context `::ans`)
                         op     :: !((b -> Eff e' ans) -> Eff e' ans),  -- the final action, just needs the resumption (:: b -> Eff e' ans) to be evaluated.
                         cont   :: !(b -> Eff e a) }                    -- the (partially) build up resumption; (b -> Eff e a) :~: (b -> Eff e' ans)` by the time we reach the prompt
 
@@ -187,21 +194,24 @@ ctxMapCtl f (Control m op cont) = Control m op (\b -> ctxMap f (cont b))
 
 {-# INLINE hideSecond #-}
 hideSecond :: Eff (h :* e) a -> Eff (h :* h' :* e) a
-hideSecond eff = ctxMap (\(CCons m h CTId (CCons m' h' g' ctx)) ->
-                             CCons m h (CTCons m' h' g') ctx) eff
+hideSecond eff = ctxMap (\(CCons ev CTId (CCons ev' g' ctx)) ->
+                             CCons ev (CTCons ev' g') ctx) eff
 
-under :: In h e => Marker h e' ans -> Context e' -> Eff e' b -> Eff e b
-under m ctx (Eff eff) = Eff (\_ -> case eff ctx of
-                                       Pure x -> Pure x
-                                       Control n op cont -> Control n op (resumeUnder m ctx cont))
-                                       -- Control n op cont -> Control n op (under m ctx . cont)) -- wrong
+under :: In h s e => Ev h s e' ans -> Eff e' b -> Eff e b
+-- under m ctx (Eff eff) = Eff (\_ -> case eff ctx of
+--                                        Pure x -> Pure x
+--                                        Control n op cont -> Control n op (resumeUnder m ctx cont))
 
-resumeUnder :: forall h a b e e' ans. In h e => Marker h e' ans -> Context e' -> (b -> Eff e' a) -> (b -> Eff e a)
-resumeUnder m ctx cont x
-  = withSubContext $ \(SubContext (CCons m' h' g' ctx') :: SubContext h) ->
-    case mmatch m m' of
-      Just Refl -> under m (applyT g' ctx') (cont x)
-      Nothing   -> error "EffEv.resumeUnder: marker does not match anymore (this should never happen?)"
+under ev@(Ev m h ctx) (Eff eff) = Eff (\_ -> case eff ctx of
+                                              Pure x -> Pure x
+                                              Control n op cont -> Control n op (resumeUnder ev cont))
+
+resumeUnder :: forall h s a b e e' ans. In h s e => Ev h s e' ans -> (b -> Eff e' a) -> (b -> Eff e a)
+resumeUnder ev@(Ev m h ctx) cont x = under ev (cont x)
+-- resumeUnder ev@(Ev m h (CCons ev'@(Ev m' h' _) g' ctx')) cont x
+--   = case mmatch m m' of
+--       Just Refl -> under (Ev m h (applyT g' ctx')) (cont x)
+--       Nothing   -> error "EffEv.resumeUnder: marker does not match anymore (this should never happen?)"
 
 
 instance Functor (Eff e) where
@@ -215,7 +225,7 @@ instance Monad (Eff e) where
 
 -- start yielding (with an initially empty continuation)
 {-# INLINE yield #-}
-yield :: Marker h e ans -> ((b -> Eff e ans) -> Eff e ans) -> Eff e' b
+yield :: Ev h s e ans -> ((b -> Eff e ans) -> Eff e ans) -> Eff e' b
 yield m op  = Eff (\ctx -> Control m op pure)
 
 {-# INLINE kcompose #-}
@@ -254,19 +264,19 @@ kcompose2 g f x
 
 -- use a prompt with a unique marker (and handle yields to it)
 {-# INLINE prompt #-}
-prompt :: Marker h e ans -> h e ans -> Eff (h :* e) ans -> Eff e ans
-prompt m h (Eff eff) = Eff $ \ctx ->
-  case (eff (CCons m h CTId ctx)) of                    -- add handler to the context
+prompt :: Marker h e ans -> h e ans -> (Ev h s e ans -> Eff ((h :@ s) :* e) ans) -> Eff e ans
+prompt m h action = Eff $ \ctx ->
+  case (unEff (action (Ev m h ctx)) (CCons (Ev m h ctx) CTId ctx)) of                    -- add handler to the context
     Pure x -> Pure x
-    Control n op cont ->
-        let cont' x = prompt m h (cont x) in      -- extend the continuation with our own prompt
+    Control ev@(Ev n h' ctx') op cont ->
+        let cont' x = prompt m h (\_ -> cont x) in      -- extend the continuation with our own prompt
         case mmatch m n of
-          Nothing   -> Control n op cont'          -- keep yielding (but with the extended continuation)
+          Nothing   -> Control ev op cont'          -- keep yielding (but with the extended continuation)
           Just Refl -> unEff (op cont') ctx   -- found our prompt, invoke `op` (under the context `ctx`).
                               -- Note: `Refl` proves `a ~ ans` and `e ~ e'` (the existential `ans,e'` in Control)
 
 {-# INLINE handler #-}
-handler :: h e ans -> Eff (h :* e) ans -> Eff e ans
+handler :: h e ans -> (forall s. Ev h s e ans -> Eff ((h :@ s) :* e) ans) -> Eff e ans
 handler h action
   = freshMarker $ \m -> prompt m h action
 
@@ -277,59 +287,58 @@ runEff (Eff eff) = case eff CNil of
                    Control _ _ _ -> error "Unhandled operation"  -- can never happen
 
 {-# INLINE handlerRet #-}
-handlerRet :: (ans -> a) -> h e a -> Eff (h :* e) ans -> Eff e a
+handlerRet :: (ans -> a) -> h e a -> (forall s. Ev h s e a -> Eff ((h :@ s) :* e) ans) -> Eff e a
 handlerRet ret h action
-  = handler h (do x <- action; return (ret x))
+  = handler h (\ev -> do x <- (action ev); return (ret x))
 
 {-# INLINE handlerHide #-}
-handlerHide :: h (h' :* e) ans -> Eff (h :* e) ans -> Eff (h' :* e) ans
+handlerHide :: h ((h' :@ s') :* e) ans -> (forall s s'. Ev h s ((h' :@ s') :* e) ans -> Eff ((h :@ s) :* e) ans) -> Eff ((h' :@ s') :* e) ans
 handlerHide h action
-  = handler h (hideSecond action)
+  = handler h (\ev -> (hideSecond $ action ev))
 
 {-# INLINE handlerHideRetEff #-}
-handlerHideRetEff :: (ans -> Eff (h' :* e) b) -> h (h' :* e) b -> Eff (h :* e) ans -> Eff (h' :* e) b
+handlerHideRetEff :: (ans -> Eff ((h' :@ s') :* e) b) -> h ((h' :@ s') :* e) b -> (forall s. Ev h s ((h' :@ s') :* e) b -> Eff ((h :@ s) :* e) ans) -> Eff ((h' :@ s') :* e) b
 handlerHideRetEff ret h action
-  = handler h (do x <- hideSecond action; mask (ret x))
+  = handler h (\ev -> do x <- hideSecond (action ev); mask (ret x))
 
 -- | Mask the top effect handler in the give action (i.e. if a operation is performed
 -- on an @h@ effect inside @e@ the top handler is ignored).
-mask :: Eff e ans -> Eff (h :* e) ans
+mask :: forall h s e ans. Eff e ans -> Eff ((h :@ s) :* e) ans
 mask eff = ctxMap ctail eff
-
 
 ---------------------------------------------------------
 --
 ---------------------------------------------------------
 
-type h :? e = In h e
+-- type h :? e = In h s e
 
-data SubContext h = forall e. SubContext !(Context (h:* e))
+data SubContext (h :: * -> * -> *) s = forall h s e. SubContext !(Context ((h :@ s):* e))
 
-class In h e where
-  subContext :: Context e -> SubContext h
+class In (h :: * -> * -> *) s e where
+  subContext :: Context e -> SubContext h s
 
-instance (InEq (HEqual h h') h h' ctx) => In h (h' :* ctx)  where
+instance (InEq (HEqual s s') s s' ctx) => In h s ((h' :@ s') :* ctx)  where
   subContext = subContextEq
 
-type family HEqual (h :: * -> * -> *) (h' :: * -> * -> *) :: Bool where
-  HEqual h h  = 'True
-  HEqual h h' = 'False
+type family HEqual s s' :: Bool where
+  HEqual s s  = 'True
+  HEqual s s' = 'False
 
-class (iseq ~ HEqual h h') => InEq iseq h h' e  where
-  subContextEq :: Context (h' :* e) -> SubContext h
+class (iseq ~ HEqual s s') => InEq iseq s s' e  where
+  subContextEq :: Context ((h' :@ s') :* e) -> SubContext h s
 
-instance (h ~ h') => InEq 'True h h' e where
+instance (s ~ s') => InEq 'True s s' e where
   subContextEq ctx = SubContext ctx
 
-instance ('False ~ HEqual h h', In h e) => InEq 'False h h' e where
+instance ('False ~ HEqual s s', In h s e) => InEq 'False s s' e where
   subContextEq ctx = subContext (ctail ctx)
 
 
-{-# INLINE withSubContext #-}
-withSubContext :: (h :? e) => (SubContext h -> Eff e a) -> Eff e a
-withSubContext action
-  = do ctx <- Eff Pure
-       action (subContext ctx)
+-- {-# INLINE withSubContext #-}
+-- withSubContext :: (h :? e) => (SubContext h -> Eff e a) -> Eff e a
+-- withSubContext action
+--   = do ctx <- Eff Pure
+--        action (subContext ctx)
 
 
 ------------------------------------
@@ -338,15 +347,20 @@ withSubContext action
 
 -- | The abstract type of operations of type @a@ to @b@, for a handler
 -- defined in an effect context @e@ and answer type @ans@.
-data Op a b e ans = Op { applyOp:: !(forall h e'. In h e' => Marker h e ans -> Context e -> a -> Eff e' b) }
+data Op a b e ans = Op { applyOp:: !(forall h s e'. In h s e' => Ev h s e ans -> a -> Eff e' b) }
 
 
 -- Given evidence and an operation selector, perform the operation
 {-# INLINE perform #-}
-perform :: In h e => (forall e' ans. h e' ans -> Op a b e' ans) -> a -> Eff e b
-perform selectOp x
-  = withSubContext $ \(SubContext (CCons m h g ctx)) ->
-      applyOp (selectOp h) m (applyT g ctx) x
+-- perform :: In h e => Marker h e' ans' -> (forall e' ans. h e' ans -> Op a b e' ans) -> a -> Eff e b
+-- perform a selectOp x
+--   = withSubContext $ \(SubContext (CCons b h g ctx)) ->
+--       case mmatch a b of
+--         Just Refl  -> applyOp (selectOp h) b (applyT g ctx) x
+--         Nothing -> error "what to do here"
+
+perform :: In h s e => (forall e' ans. h e' ans -> Op a b e' ans) -> Ev h s e' ans -> a -> Eff e b
+perform selectOp ev@(Ev m h ctx) x = applyOp (selectOp h) ev x
 
 -- | Create an operation that always resumes with a constant value (of type @a@).
 -- (see also the `perform` example).
@@ -358,7 +372,7 @@ value x = function (\() -> return x)
 -- general operations as they can execute /in-place/ (instead of yielding to the handler).
 -- Most operations are tail-resumptive. (See also the `handlerLocal` example).
 function :: (a -> Eff e b) -> Op a b e ans
-function f = Op (\m ctx x -> under m ctx (f x))
+function f = Op (\m x -> under m (f x))
 
 -- | Create an fully general operation from type @a@ to @b@.
 -- the function @f@ takes the argument, and a /resumption/ function of type @b -> `Eff` e ans@
@@ -377,13 +391,13 @@ function f = Op (\m ctx x -> under m ctx (f x))
 --             Amb{ flip = `operation` (\\() k -> do{ xs <- k True; ys <- k False; return (xs ++ ys)) }) }
 -- @
 operation :: (a -> (b -> Eff e ans) -> Eff e ans) -> Op a b e ans
-operation f = Op (\m ctx x -> yield m (\ctlk -> f x ctlk))
+operation f = Op (\ev x -> yield ev (\ctlk -> f x ctlk))
 
 
 -- | Create an operation that never resumes (an exception).
 -- (See `handlerRet` for an example).
 except :: (a -> Eff e ans) -> Op a b e ans
-except f = Op (\m ctx x -> yield m (\ctlk -> f x))
+except f = Op (\ev x -> yield ev (\ctlk -> f x))
 
 --------------------------------------------------------------------------------
 -- Efficient (and safe) Local state handler
@@ -391,83 +405,83 @@ except f = Op (\m ctx x -> yield m (\ctlk -> f x))
 -- | The type of the built-in state effect.
 -- (This state is generally more efficient than rolling your own and usually
 -- used in combination with `handlerLocal` to provide local isolated state)
-newtype Local a e ans = Local (IORef a)
+-- newtype Local a e ans = Local (IORef a)
 
--- | Unsafe `IO` in the `Eff` monad.
-{-# INLINE unsafeIO #-}
-unsafeIO :: IO a -> Eff e a
-unsafeIO io = let x = unsafeInlinePrim io in seq x (Eff $ \_ -> Pure x)
+-- -- | Unsafe `IO` in the `Eff` monad.
+-- {-# INLINE unsafeIO #-}
+-- unsafeIO :: IO a -> Eff e a
+-- unsafeIO io = let x = unsafeInlinePrim io in seq x (Eff $ \_ -> Pure x)
 
--- | Get the value of the local state.
-{-# INLINE lget #-}
-lget :: Local a e ans -> Op () a e ans
-lget (Local r) = Op (\m ctx x -> unsafeIO (seq x $ readIORef r))
+-- -- | Get the value of the local state.
+-- {-# INLINE lget #-}
+-- lget :: Local a e ans -> Op () a e ans
+-- lget (Local r) = Op (\m ctx x -> unsafeIO (seq x $ readIORef r))
 
--- | Set the value of the local state.
-{-# INLINE lput #-}
-lput :: Local a e ans -> Op a () e ans
-lput (Local r) = Op (\m ctx x -> unsafeIO (writeIORef r x))
+-- -- | Set the value of the local state.
+-- {-# INLINE lput #-}
+-- lput :: Local a e ans -> Op a () e ans
+-- lput (Local r) = Op (\m ctx x -> unsafeIO (writeIORef r x))
 
--- | Update the value of the local state.
-{-# INLINE lmodify #-}
-lmodify :: Local a e ans -> Op (a -> a) () e ans
-lmodify (Local r) = Op (\m ctx f -> unsafeIO (do{ x <- readIORef r; writeIORef r $! (f x) }))
+-- -- | Update the value of the local state.
+-- {-# INLINE lmodify #-}
+-- lmodify :: Local a e ans -> Op (a -> a) () e ans
+-- lmodify (Local r) = Op (\m ctx f -> unsafeIO (do{ x <- readIORef r; writeIORef r $! (f x) }))
 
--- | Get the value of the local state if it is the top handler.
-localGet :: Eff (Local a :* e) a
-localGet = perform lget ()
+-- -- | Get the value of the local state if it is the top handler.
+-- localGet :: Ev (Local a) e ans -> Eff (Local a :* e) a
+-- localGet m = perform m lget ()
 
--- | Set the value of the local state if it is the top handler.
-localPut :: a -> Eff (Local a :* e) ()
-localPut x = perform lput x
+-- -- | Set the value of the local state if it is the top handler.
+-- localPut :: Ev (Local a) e ans -> a -> Eff (Local a :* e) ()
+-- localPut m x = perform m lput x
 
--- | Update the value of the local state if it is the top handler.
-localModify :: (a -> a) -> Eff (Local a :* e) ()
-localModify f = perform lmodify f
+-- -- | Update the value of the local state if it is the top handler.
+-- localModify :: Ev (Local a) e ans -> (a -> a) -> Eff (Local a :* e) ()
+-- localModify m f = perform m lmodify f
 
--- A special prompt that saves and restores state per resumption
-mpromptIORef :: IORef a -> Eff e b -> Eff e b
-mpromptIORef r action
-  = Eff $ \ctx -> case (unEff action ctx) of
-      p@(Pure _) -> p
-      Control m op cont
-        -> do val <- unEff (unsafeIO (readIORef r)) ctx                     -- save current value on yielding
-              let cont' x = do unsafeIO (writeIORef r val)  -- restore saved value on resume
-                               mpromptIORef r (cont x)
-              Control m op cont'
+-- -- A special prompt that saves and restores state per resumption
+-- mpromptIORef :: IORef a -> Eff e b -> Eff e b
+-- mpromptIORef r action
+--   = Eff $ \ctx -> case (unEff action ctx) of
+--       p@(Pure _) -> p
+--       Control m op cont
+--         -> do val <- unEff (unsafeIO (readIORef r)) ctx                     -- save current value on yielding
+--               let cont' x = do unsafeIO (writeIORef r val)  -- restore saved value on resume
+--                                mpromptIORef r (cont x)
+--               Control m op cont'
 
--- | Create an `IORef` connected to a prompt. The value of
--- the `IORef` is saved and restored through resumptions.
-unsafePromptIORef :: a -> (Marker h e b -> IORef a -> Eff e b) -> Eff e b
-unsafePromptIORef init action
-  = freshMarker $ \m ->
-    do r <- unsafeIO (newIORef init)
-       mpromptIORef r (action m r)
+-- -- | Create an `IORef` connected to a prompt. The value of
+-- -- the `IORef` is saved and restored through resumptions.
+-- unsafePromptIORef :: a -> (Marker h e b -> IORef a -> Eff e b) -> Eff e b
+-- unsafePromptIORef init action
+--   = freshMarker $ \m ->
+--     do r <- unsafeIO (newIORef init)
+--        mpromptIORef r (action m r)
 
--- | Create a local state handler with an initial state of type @a@,
--- with a return function to combine the final result with the final state to a value of type @b@.
-{-# INLINE localRet #-}
-localRet :: a -> (ans -> a -> b) -> Eff (Local a :* e) ans -> Eff e b
-localRet init ret action
-  = unsafePromptIORef init $ \m r ->  -- set a fresh prompt with marker `m`
-        do x <- ctxMap (\ctx -> CCons m (Local r) CTId ctx) action -- and call action with the extra evidence
-           y <- unsafeIO (readIORef r)
-           return (ret x y)
+-- -- | Create a local state handler with an initial state of type @a@,
+-- -- with a return function to combine the final result with the final state to a value of type @b@.
+-- {-# INLINE localRet #-}
+-- localRet :: a -> (ans -> a -> b) -> (Marker (Local a) e b -> Eff (Local a :* e) ans) -> Eff e b
+-- localRet init ret action
+--   = unsafePromptIORef init $ \m r ->  -- set a fresh prompt with marker `m`
+--         do x <- ctxMap (\ctx -> CCons m (Local r) CTId ctx) (action m) -- and call action with the extra evidence
+--            y <- unsafeIO (readIORef r)
+--            return (ret x y)
 
--- | Create a local state handler with an initial state of type @a@.
-{-# INLINE local #-}
-local :: a -> Eff (Local a :* e) ans -> Eff e ans
-local init action
-  = localRet init const action
+-- -- | Create a local state handler with an initial state of type @a@.
+-- {-# INLINE local #-}
+-- local :: a -> (Marker (Local a) e ans -> Eff (Local a :* e) ans) -> Eff e ans
+-- local init action
+--   = localRet init const action
 
--- | Create a new handler for @h@ which can access the /locally isolated state/ @`Local` a@.
--- This is fully local to the handler @h@ only and not visible in the @action@ as
--- apparent from its effect context (which does /not/ contain @`Local` a@). The
--- @ret@ argument can be used to transform the final result combined with the final state.
-{-# INLINE handlerLocalRet #-}
-handlerLocalRet :: a -> (ans -> a -> b) -> (h (Local a :* e) b) -> Eff (h :* e) ans -> Eff e b
-handlerLocalRet init ret h action
-  = local init $ handlerHideRetEff (\x -> do{ y <- localGet; return (ret x y)}) h action
+-- -- | Create a new handler for @h@ which can access the /locally isolated state/ @`Local` a@.
+-- -- This is fully local to the handler @h@ only and not visible in the @action@ as
+-- -- apparent from its effect context (which does /not/ contain @`Local` a@). The
+-- -- @ret@ argument can be used to transform the final result combined with the final state.
+-- {-# INLINE handlerLocalRet #-}
+-- handlerLocalRet :: a -> (ans -> a -> b) -> (h (Local a :* e) b) -> (Marker h (Local a :* e) b -> Eff (h :* e) ans) -> Eff e b
+-- handlerLocalRet init ret h action
+--   = local init $ \m -> handlerHideRetEff (\x -> do{ y <- localGet m; return (ret x y)}) h action
 
 -- | Create a new handler for @h@ which can access the /locally isolated state/ @`Local` a@.
 -- This is fully local to the handler @h@ only and not visible in the @action@ as
@@ -484,7 +498,7 @@ handlerLocalRet init ret h action
 --        state (41::Int) $
 --        inc                -- see `:?`
 -- @
-{-# INLINE handlerLocal #-}
-handlerLocal :: a -> (h (Local a :* e) ans) -> Eff (h :* e) ans -> Eff e ans
-handlerLocal init h action
-  = local init (handlerHide h action)
+-- {-# INLINE handlerLocal #-}
+-- handlerLocal :: a -> (h (Local a :* e) ans) -> (Marker h (Local a :* e) ans -> Eff (h :* e) ans) -> Eff e ans
+-- handlerLocal init h action
+--   = local init (\m -> handlerHide h action)
