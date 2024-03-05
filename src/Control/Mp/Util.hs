@@ -7,22 +7,22 @@ Stability   : Experimental
 
 Some definitions for common effects.
 -}
-{-# LANGUAGE TypeOperators, FlexibleContexts, FlexibleInstances, MultiParamTypeClasses, UndecidableInstances, Rank2Types #-}
+{-# LANGUAGE TypeOperators, FlexibleContexts, FlexibleInstances, MultiParamTypeClasses, UndecidableInstances, Rank2Types, AllowAmbiguousTypes #-}
 module Control.Mp.Util
   (
     -- * Reader
     Reader(Reader,ask)
   , reader
     -- * State
-  , State(State,get,put)
-  , state
-    -- * Writer
-  , Writer(Writer,tell)
-  , writer
+  -- , State(State,get,put)
+  -- , state
+  --   -- * Writer
+  -- , Writer(Writer,tell)
+  -- , writer
     -- * Exception
   , Except(Except,throwError)
   , catchError, exceptEither, exceptMaybe, exceptDefault
-    -- * Choice
+  --   -- * Choice
   , Choose(Choose,none,choose)
   , chooseFirst, chooseAll
 ) where
@@ -41,9 +41,9 @@ data Reader a e ans = Reader { ask :: !(Op () a e ans)  -- ^ get the reader valu
 
 -- | A handler for a `Reader` effect with a value of type @a@.
 {-# INLINE reader #-}
-reader :: a -> Eff (Reader a :* e) ans -> Eff e ans
-reader x
-  = handler (Reader{ ask = value x })
+reader :: a -> (forall s. Ev (Reader a) s e ans -> Eff ((Reader a :@ s) :* e) ans) -> Eff e ans
+reader x 
+  = handler (Reader{ ask = value x }) 
 
 {-
 -- does not work due to the functional dependency in MonadReader
@@ -56,16 +56,16 @@ instance (Reader a :? e) => MR.MonadReader a (Eff e) where
 ------------
 
 -- | A standard state effect of type @a@.
-data State a e ans = State { get :: !(Op () a e ans) -- ^ Get the current state (as @`perform` get ()@)
-                           , put :: !(Op a () e ans) -- ^ Set the current state (as @`perform` put x@)
-                           }
+-- data State a e ans = State { get :: !(Op () a e ans) -- ^ Get the current state (as @`perform` get ()@)
+--                            , put :: !(Op a () e ans) -- ^ Set the current state (as @`perform` put x@)
+--                            }
 
--- | A state handler that takes an initial state of type @a@.
-{-# INLINE state #-}
-state :: a -> Eff (State a :* e) ans -> Eff e ans
-state init
-  = handlerLocal init (State{ get = function (\_ -> localGet),
-                              put = function (\x -> localPut x) })
+-- -- | A state handler that takes an initial state of type @a@.
+-- {-# INLINE state #-}
+-- state :: a -> Eff ((State a :@ s) :* e) ans -> Eff e ans
+-- state init
+--   = handlerLocal init (State{ get = function (\_ -> localGet),
+--                               put = function (\x -> localPut x) })
 
 
 {-
@@ -80,16 +80,16 @@ instance (State a :? e) => MS.MonadState a (Eff e) where
 ------------
 
 -- | A standard writer effect of type @a@
-data Writer a e ans = Writer { tell :: !(Op a () e ans) -- ^ Output a value of type @a@ (as @`perform` tell msg@)
-                             }
+-- data Writer a e ans = Writer { tell :: !(Op a () e ans) -- ^ Output a value of type @a@ (as @`perform` tell msg@)
+--                              }
 
--- | A standard `Writer` handler for any monoidal type @a@. Returns the final
--- result of type @ans@ and the appended @tell@ arguments.
-{-# INLINE writer #-}
-writer :: (Monoid a) => Eff (Writer a :* e) ans -> Eff e (ans,a)
-writer
-  = handlerLocalRet mempty (,) $
-    Writer{ tell = function (\x -> do{ xs <- localGet; localPut (mappend xs x); return () }) }
+-- -- | A standard `Writer` handler for any monoidal type @a@. Returns the final
+-- -- result of type @ans@ and the appended @tell@ arguments.
+-- {-# INLINE writer #-}
+-- writer :: (Monoid a) => Eff ((Writer a :@ s) :* e) ans -> Eff e (ans,a)
+-- writer
+--   = handlerLocalRet mempty (,) $
+--     Writer{ tell = function (\x -> do{ xs <- localGet; localPut (mappend xs x); return () }) }
 
 
 ------------
@@ -101,22 +101,25 @@ data Except a e ans = Except { throwError :: !(forall b. Op a b e ans) -- ^ Thro
                              }
 
 -- | Handle an exception.
-catchError :: Eff (Except a :* e) ans -> (a -> Eff e ans) -> Eff e ans
+catchError :: (forall s. Ev (Except a) s e ans -> Eff ((Except a :@ s) :* e) ans) -> (a -> Eff e ans) -> Eff e ans
 catchError action h
   = handler (Except{ throwError = except (\x -> h x) }) action
 
 -- | Transform an exception effect to an @Either@ type.
-exceptEither :: Eff (Except a :* e) ans -> Eff e (Either a ans)
+
+exceptEither :: (forall s. Ev (Except a) s e (Either a ans) -> Eff ((Except a :@ s) :* e) ans) -> Eff e (Either a ans)
 exceptEither
   = handlerRet Right (Except{ throwError = except (\x -> return (Left x) ) })
 
 -- | Remove the exception effect using a default value in case an exception was thrown.
-exceptDefault :: ans -> Eff (Except a :* e) ans -> Eff e ans
+-- exceptDefault :: ans -> Eff ((Except a :@ s) :* e) ans -> Eff e ans
+exceptDefault :: ans -> (forall s. Ev (Except a) s e ans -> Eff ((Except a :@ s) :* e) ans) -> Eff e ans
 exceptDefault def
   = handler (Except{ throwError = except (\_ -> return def) })
 
 -- | Transform an exception effect to a @Maybe@ type.
-exceptMaybe :: Eff (Except a :* e) ans -> Eff e (Maybe ans)
+-- exceptMaybe :: Eff ((Except a :@ s) :* e) ans -> Eff e (Maybe ans)
+exceptMaybe :: (forall s. Ev (Except a) s e (Maybe ans) -> Eff ((Except a :@ s) :* e) ans) -> Eff e (Maybe ans)
 exceptMaybe
   = handlerRet Just (Except{ throwError = except (\_ -> return Nothing) })
 
@@ -133,7 +136,7 @@ data Choose e ans = Choose { none   :: !(forall a. Op () a e ans)  -- ^ @`perfor
 
 
 -- | Return the first result found in a computation using `choose` for backtracking.
-chooseFirst :: Eff (Choose :* e) ans -> Eff e (Maybe ans)
+-- chooseFirst :: Eff ((Choose :@ s) :* e) ans -> Eff e (Maybe ans)
 chooseFirst
   = handlerRet Just $
     Choose{ none   = except (\_ -> return Nothing)
@@ -147,7 +150,7 @@ chooseFirst
           }
 
 -- | Return all possible results found in a computation using `choose` for backtracking
-chooseAll :: Eff (Choose :* e) a -> Eff e [a]
+-- chooseAll :: Eff ((Choose :@ s) :* e) a -> Eff e [a]
 chooseAll
   = handlerRet (\x -> [x]) $
     Choose{ none   = except (\_ -> return [])
@@ -157,12 +160,13 @@ chooseAll
                                          in collect hi [])
           }
 
-instance (Choose :? e) => Alternative (Eff e) where
-  empty      = perform none ()
-  m1 <|> m2  = do x <- perform choose 2
-                  if (x==1) then m1 else m2
+-- instance (In Choose s e) => Alternative (Eff e) where
+--   empty      = perform none ()
+--   m1 <|> m2  = do x <- perform choose 2
+--                   if (x==1) then m1 else m2
 
-instance (Choose :? e) => MonadPlus (Eff e) where
-  mzero       = perform none ()
-  mplus m1 m2 = do x <- perform choose 2
-                   if (x==1) then m1 else m2
+-- instance (In Choose s e) => MonadPlus (Eff e) where
+--   mzero       = perform none ()
+--   mplus m1 m2 = do x <- perform choose 2
+--                    if (x==1) then m1 else m2
+

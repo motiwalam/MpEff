@@ -57,8 +57,12 @@ module Control.Mp.Eff(
 
             -- * Effect context
             -- , (:?)            -- h :? e,  is h in e?
+            , In 
             , (:*)            -- h :* e,  cons h in front of e
+            , (:@)
             -- , In           -- alias for :?
+
+            , Ev
 
             -- * Perform and Handlers
             , perform         -- :: (h :? e) => (forall e' ans. h e' ans -> Op a b e' ans) -> a -> Eff e b
@@ -187,13 +191,15 @@ lift ctl = Eff (\ctx -> ctl)
 ctxMap :: (Context e' -> Context e) -> Eff e a -> Eff e' a
 ctxMap f eff = Eff (\ctx -> ctxMapCtl f $ unEff eff (f ctx))
 
+ctxMap2 f action = Eff (\ctx -> ctxMapCtl f $ unEff (action ctx) (f ctx))
+
 {-# INLINE ctxMapCtl #-}
 ctxMapCtl :: (Context e' -> Context e) -> Ctl e a -> Ctl e' a
 ctxMapCtl f (Pure x) = Pure x
 ctxMapCtl f (Control m op cont) = Control m op (\b -> ctxMap f (cont b))
 
 {-# INLINE hideSecond #-}
-hideSecond :: Eff (h :* e) a -> Eff (h :* h' :* e) a
+hideSecond :: Eff ((h :@ s) :* e) a -> Eff ((h :@ s) :* (h' :@ s') :* e) a
 hideSecond eff = ctxMap (\(CCons ev CTId (CCons ev' g' ctx)) ->
                              CCons ev (CTCons ev' g') ctx) eff
 
@@ -293,7 +299,7 @@ handlerRet ret h action
   = handler h (\ev -> do x <- (action ev); return (ret x))
 
 {-# INLINE handlerHide #-}
-handlerHide :: h ((h' :@ s') :* e) ans -> (forall s s'. Ev h s ((h' :@ s') :* e) ans -> Eff ((h :@ s) :* e) ans) -> Eff ((h' :@ s') :* e) ans
+handlerHide :: h ((h' :@ s') :* e) ans -> (forall s. Ev h s ((h' :@ s') :* e) ans -> Eff ((h :@ s) :* e) ans) -> Eff ((h' :@ s') :* e) ans
 handlerHide h action
   = handler h (\ev -> (hideSecond $ action ev))
 
@@ -315,6 +321,7 @@ mask eff = ctxMap ctail eff
 
 data SubContext (h :: * -> * -> *) s = forall h s e. SubContext !(Context ((h :@ s):* e))
 
+-- type In h se = In h se 
 class In (h :: * -> * -> *) s e where
   subContext :: Context e -> SubContext h s
 
@@ -406,100 +413,102 @@ except f = Op (\ev x -> yield ev (\ctlk -> f x))
 -- | The type of the built-in state effect.
 -- (This state is generally more efficient than rolling your own and usually
 -- used in combination with `handlerLocal` to provide local isolated state)
--- newtype Local a e ans = Local (IORef a)
+newtype Local a e ans = Local (IORef a)
 
--- -- | Unsafe `IO` in the `Eff` monad.
--- {-# INLINE unsafeIO #-}
--- unsafeIO :: IO a -> Eff e a
--- unsafeIO io = let x = unsafeInlinePrim io in seq x (Eff $ \_ -> Pure x)
+-- | Unsafe `IO` in the `Eff` monad.
+{-# INLINE unsafeIO #-}
+unsafeIO :: IO a -> Eff e a
+unsafeIO io = let x = unsafeInlinePrim io in seq x (Eff $ \_ -> Pure x)
 
--- -- | Get the value of the local state.
--- {-# INLINE lget #-}
--- lget :: Local a e ans -> Op () a e ans
--- lget (Local r) = Op (\m ctx x -> unsafeIO (seq x $ readIORef r))
+-- | Get the value of the local state.
+{-# INLINE lget #-}
+lget :: Local a e ans -> Op () a e ans
+lget (Local r) = Op (\m x -> unsafeIO (seq x $ readIORef r))
 
--- -- | Set the value of the local state.
--- {-# INLINE lput #-}
--- lput :: Local a e ans -> Op a () e ans
--- lput (Local r) = Op (\m ctx x -> unsafeIO (writeIORef r x))
+-- | Set the value of the local state.
+{-# INLINE lput #-}
+lput :: Local a e ans -> Op a () e ans
+lput (Local r) = Op (\m x -> unsafeIO (writeIORef r x))
 
--- -- | Update the value of the local state.
--- {-# INLINE lmodify #-}
--- lmodify :: Local a e ans -> Op (a -> a) () e ans
--- lmodify (Local r) = Op (\m ctx f -> unsafeIO (do{ x <- readIORef r; writeIORef r $! (f x) }))
+-- | Update the value of the local state.
+{-# INLINE lmodify #-}
+lmodify :: Local a e ans -> Op (a -> a) () e ans
+lmodify (Local r) = Op (\m f -> unsafeIO (do{ x <- readIORef r; writeIORef r $! (f x) }))
 
--- -- | Get the value of the local state if it is the top handler.
--- localGet :: Ev (Local a) e ans -> Eff (Local a :* e) a
--- localGet m = perform m lget ()
+-- | Get the value of the local state if it is the top handler.
+localGet :: Ev (Local a) s e ans -> Eff ((Local a :@ s) :* e) a
+localGet m = perform lget m ()
 
--- -- | Set the value of the local state if it is the top handler.
--- localPut :: Ev (Local a) e ans -> a -> Eff (Local a :* e) ()
--- localPut m x = perform m lput x
+-- | Set the value of the local state if it is the top handler.
+localPut :: Ev (Local a) s e ans -> a -> Eff ((Local a :@ s) :* e) ()
+localPut m x = perform lput m x
 
--- -- | Update the value of the local state if it is the top handler.
--- localModify :: Ev (Local a) e ans -> (a -> a) -> Eff (Local a :* e) ()
--- localModify m f = perform m lmodify f
+-- | Update the value of the local state if it is the top handler.
+localModify :: Ev (Local a) s e ans -> (a -> a) -> Eff ((Local a :@ s) :* e) ()
+localModify m f = perform lmodify m f
 
--- -- A special prompt that saves and restores state per resumption
--- mpromptIORef :: IORef a -> Eff e b -> Eff e b
--- mpromptIORef r action
---   = Eff $ \ctx -> case (unEff action ctx) of
---       p@(Pure _) -> p
---       Control m op cont
---         -> do val <- unEff (unsafeIO (readIORef r)) ctx                     -- save current value on yielding
---               let cont' x = do unsafeIO (writeIORef r val)  -- restore saved value on resume
---                                mpromptIORef r (cont x)
---               Control m op cont'
+-- A special prompt that saves and restores state per resumption
+mpromptIORef :: IORef a -> Eff e b -> Eff e b
+mpromptIORef r action
+  = Eff $ \ctx -> case (unEff action ctx) of
+      p@(Pure _) -> p
+      Control m op cont
+        -> do val <- unEff (unsafeIO (readIORef r)) ctx                     -- save current value on yielding
+              let cont' x = do unsafeIO (writeIORef r val)  -- restore saved value on resume
+                               mpromptIORef r (cont x)
+              Control m op cont'
 
--- -- | Create an `IORef` connected to a prompt. The value of
--- -- the `IORef` is saved and restored through resumptions.
--- unsafePromptIORef :: a -> (Marker h e b -> IORef a -> Eff e b) -> Eff e b
--- unsafePromptIORef init action
---   = freshMarker $ \m ->
---     do r <- unsafeIO (newIORef init)
---        mpromptIORef r (action m r)
+-- | Create an `IORef` connected to a prompt. The value of
+-- the `IORef` is saved and restored through resumptions.
+unsafePromptIORef :: a -> (Marker h e b -> IORef a -> Eff e b) -> Eff e b
+unsafePromptIORef init action
+  = freshMarker $ \m ->
+    do r <- unsafeIO (newIORef init)
+       mpromptIORef r (action m r)
 
 -- -- | Create a local state handler with an initial state of type @a@,
 -- -- with a return function to combine the final result with the final state to a value of type @b@.
--- {-# INLINE localRet #-}
--- localRet :: a -> (ans -> a -> b) -> (Marker (Local a) e b -> Eff (Local a :* e) ans) -> Eff e b
--- localRet init ret action
---   = unsafePromptIORef init $ \m r ->  -- set a fresh prompt with marker `m`
---         do x <- ctxMap (\ctx -> CCons m (Local r) CTId ctx) (action m) -- and call action with the extra evidence
---            y <- unsafeIO (readIORef r)
---            return (ret x y)
+{-# INLINE localRet #-}
+localRet :: a -> (ans -> a -> b) -> (forall s. Ev (Local a) s e b -> Eff ((Local a :@ s) :* e) ans) -> Eff e b
+localRet init ret action
+  = unsafePromptIORef init $ \m r ->  -- set a fresh prompt with marker `m`
+        do x <- ctxMap2 (\ctx -> CCons (Ev m (Local r) ctx) CTId ctx) (\ctx -> (action (Ev m (Local r) ctx))) -- and call action with the extra evidence
+           y <- unsafeIO (readIORef r)
+           return (ret x y)
 
 -- -- | Create a local state handler with an initial state of type @a@.
--- {-# INLINE local #-}
--- local :: a -> (Marker (Local a) e ans -> Eff (Local a :* e) ans) -> Eff e ans
--- local init action
---   = localRet init const action
+{-# INLINE local #-}
+local :: a -> (forall s. Ev (Local a) s e ans -> Eff ((Local a :@ s) :* e) ans) -> Eff e ans
+local init action
+  = localRet init const action
 
 -- -- | Create a new handler for @h@ which can access the /locally isolated state/ @`Local` a@.
 -- -- This is fully local to the handler @h@ only and not visible in the @action@ as
 -- -- apparent from its effect context (which does /not/ contain @`Local` a@). The
 -- -- @ret@ argument can be used to transform the final result combined with the final state.
 -- {-# INLINE handlerLocalRet #-}
--- handlerLocalRet :: a -> (ans -> a -> b) -> (h (Local a :* e) b) -> (Marker h (Local a :* e) b -> Eff (h :* e) ans) -> Eff e b
+-- handlerLocalRet :: a -> (ans -> a -> b) -> (h ((Local a :@ s) :* e) b) -> (forall s'. Ev h s' ((Local a :@ s') :* e) b -> Eff ((h :@ s') :* e) ans) -> Eff e b
 -- handlerLocalRet init ret h action
---   = local init $ \m -> handlerHideRetEff (\x -> do{ y <- localGet m; return (ret x y)}) h action
+--   = local init $ \m -> handlerHideRetEff (\x -> do{ y <- localGet m; return (ret x y)}) h _
 
--- | Create a new handler for @h@ which can access the /locally isolated state/ @`Local` a@.
--- This is fully local to the handler @h@ only and not visible in the @action@ as
--- apparent from its effect context (which does /not/ contain @`Local` a@).
---
--- @
--- data State a e ans = State { get :: `Op` () a e ans, put :: `Op` a () e ans  }
---
--- state :: a -> `Eff` (State a `:*` e) ans -> `Eff` e ans
--- state init = `handlerLocal` init (State{ get = `function` (\\_ -> `perform` `lget` ()),
---                                        put = `function` (\\x -> `perform` `lput` x) })
---
--- test = `runEff` $
---        state (41::Int) $
---        inc                -- see `:?`
--- @
+-- -- -- | Create a new handler for @h@ which can access the /locally isolated state/ @`Local` a@.
+-- -- -- This is fully local to the handler @h@ only and not visible in the @action@ as
+-- -- -- apparent from its effect context (which does /not/ contain @`Local` a@).
+
+-- -- @
+-- -- data State a e ans = State { get :: `Op` () a e ans, put :: `Op` a () e ans  }
+
+-- -- state :: a -> `Eff` (State a `:*` e) ans -> `Eff` e ans
+-- -- state init = `handlerLocal` init (State{ get = `function` (\\_ -> `perform` `lget` ()),
+-- --                                        put = `function` (\\x -> `perform` `lput` x) })
+
+-- -- test = `runEff` $
+-- --        state (41::Int) $
+-- --        inc                -- see `:?`
+-- -- @
 -- {-# INLINE handlerLocal #-}
--- handlerLocal :: a -> (h (Local a :* e) ans) -> (Marker h (Local a :* e) ans -> Eff (h :* e) ans) -> Eff e ans
+-- handlerHide :: h ((h' :@ s') :* e) ans -> (forall s s'. Ev h s ((h' :@ s') :* e) ans -> Eff ((h :@ s) :* e) ans) -> Eff ((h' :@ s') :* e) ans
+-- handlerLocal :: a -> h ((Local a :@ s') :* e) ans -> (forall s. Ev h s ((Local a :@ s') :* e) ans -> Eff ((h :@ s) :* e) ans) -> Eff e ans
+-- handlerLocal :: a -> (h ((Local a :@ s') :* e) ans) -> (forall s. Ev h s ((Local a :@ s') :* e) ans -> Eff ((h :@ s) :* e) ans) -> Eff e ans
 -- handlerLocal init h action
---   = local init (\m -> handlerHide h action)
+--   = local init (\ev -> handlerHide h action)
