@@ -1,10 +1,10 @@
 cabal-version: 1.12
 
--- This file has been generated from package.yaml by hpack version 0.33.0.
+-- This file has been generated from package.yaml by hpack version 0.35.1.
 --
 -- see: https://github.com/sol/hpack
 --
--- hash: b8ecf1544cc419d434acb5067f25bfdb4ba919f6db167c0d989bd35945ae61ee
+-- hash: f737ac63f1eae17980dcf5752e6c79d8933921d9c05629fc3a437922c9cd8881
 
 name:           mpeff
 version:        0.1.0.0
@@ -31,6 +31,9 @@ library
   exposed-modules:
       Control.Mp.Eff
       Control.Mp.Util
+      Example.Basic
+      Example.Nim
+      Example.Parser
   other-modules:
       Paths_mpeff
   hs-source-dirs:
