@@ -7,7 +7,7 @@ Stability   : Experimental
 
 Some definitions for common effects.
 -}
-{-# LANGUAGE TypeOperators, FlexibleContexts, FlexibleInstances, MultiParamTypeClasses, UndecidableInstances, Rank2Types, AllowAmbiguousTypes #-}
+{-# LANGUAGE TypeOperators, FlexibleContexts, FlexibleInstances, MultiParamTypeClasses, UndecidableInstances, Rank2Types #-}
 module Control.Mp.Util
   (
     -- * Reader

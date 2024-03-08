@@ -79,20 +79,20 @@ module Control.Mp.Eff(
             , operation       -- :: (a -> (b -> Eff e ans)) -> Op a b e ans
 
             -- * Local state
-            -- , Local           -- Local a e ans
+            , Local           -- Local a e ans
 
-            -- , local           -- :: a -> Eff (Local a :* e) ans -> Eff e ans
-            -- , localRet        -- :: a -> (ans -> a -> b) -> Eff (Local a :* e) ans -> Eff e b
-            -- , handlerLocal    -- :: a -> h (Local a :* e) ans -> Eff (h :* e) ans -> Eff e ans
-            -- , handlerLocalRet -- :: a -> (ans -> a -> b) -> h (Local a :* e) b -> Eff (h :* e) ans -> Eff e b
+            , local           -- :: a -> Eff (Local a :* e) ans -> Eff e ans
+            , localRet        -- :: a -> (ans -> a -> b) -> Eff (Local a :* e) ans -> Eff e b
+            , handlerLocal    -- :: a -> h (Local a :* e) ans -> Eff (h :* e) ans -> Eff e ans
+            , handlerLocalRet -- :: a -> (ans -> a -> b) -> h (Local a :* e) b -> Eff (h :* e) ans -> Eff e b
 
-            -- , lget            -- :: (Local a :? e) => Eff e a
-            -- , lput            -- :: (Local a :? e) => a -> Eff e ()
-            -- , lmodify         -- :: (Local a :? e) => (a -> a) -> Eff e ()
+            , lget            -- :: (Local a :? e) => Eff e a
+            , lput            -- :: (Local a :? e) => a -> Eff e ()
+            , lmodify         -- :: (Local a :? e) => (a -> a) -> Eff e ()
 
-            -- , localGet        -- :: Eff (Local a :* e) a
-            -- , localPut        -- :: a -> Eff (Local a :* e) ()
-            -- , localModify     -- :: (a -> a) -> Eff (Local a :* e) a
+            , localGet        -- :: Eff (Local a :* e) a
+            , localPut        -- :: a -> Eff (Local a :* e) ()
+            , localModify     -- :: (a -> a) -> Eff (Local a :* e) a
 
             ) where
 
@@ -486,10 +486,10 @@ local init action
 -- -- This is fully local to the handler @h@ only and not visible in the @action@ as
 -- -- apparent from its effect context (which does /not/ contain @`Local` a@). The
 -- -- @ret@ argument can be used to transform the final result combined with the final state.
--- {-# INLINE handlerLocalRet #-}
--- handlerLocalRet :: a -> (ans -> a -> b) -> (h ((Local a :@ s) :* e) b) -> (forall s'. Ev h s' ((Local a :@ s') :* e) b -> Eff ((h :@ s') :* e) ans) -> Eff e b
--- handlerLocalRet init ret h action
---   = local init $ \m -> handlerHideRetEff (\x -> do{ y <- localGet m; return (ret x y)}) h _
+{-# INLINE handlerLocalRet #-}
+handlerLocalRet :: a -> (ans -> a -> b) -> (forall s. Ev (Local a) s e b -> h ((Local a :@ s) :* e) b) -> (forall s s'. Ev h s' ((Local a :@ s) :* e) b -> Eff ((h :@ s') :* e) ans) -> Eff e b
+handlerLocalRet init ret h action
+  = local init $ \ev -> handlerHideRetEff (\x -> do{ y <- localGet ev; return (ret x y)}) (h ev) action
 
 -- -- -- | Create a new handler for @h@ which can access the /locally isolated state/ @`Local` a@.
 -- -- -- This is fully local to the handler @h@ only and not visible in the @action@ as
@@ -506,9 +506,6 @@ local init action
 -- --        state (41::Int) $
 -- --        inc                -- see `:?`
 -- -- @
--- {-# INLINE handlerLocal #-}
--- handlerHide :: h ((h' :@ s') :* e) ans -> (forall s s'. Ev h s ((h' :@ s') :* e) ans -> Eff ((h :@ s) :* e) ans) -> Eff ((h' :@ s') :* e) ans
--- handlerLocal :: a -> h ((Local a :@ s') :* e) ans -> (forall s. Ev h s ((Local a :@ s') :* e) ans -> Eff ((h :@ s) :* e) ans) -> Eff e ans
--- handlerLocal :: a -> (h ((Local a :@ s') :* e) ans) -> (forall s. Ev h s ((Local a :@ s') :* e) ans -> Eff ((h :@ s) :* e) ans) -> Eff e ans
--- handlerLocal init h action
---   = local init (\ev -> handlerHide h action)
+{-# INLINE handlerLocal #-}
+handlerLocal :: a -> (forall s'. Ev (Local a) s' e ans -> h ((Local a :@ s') :* e) ans) -> (forall s' s. Ev h s ((Local a :@ s') :* e) ans -> Eff ((h :@ s) :* e) ans) -> Eff e ans
+handlerLocal init h action = local init (\ev -> handlerHide (h ev) action)
