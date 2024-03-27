@@ -57,7 +57,7 @@ module Control.Mp.Eff(
 
             -- * Effect context
             -- , (:?)            -- h :? e,  is h in e?
-            , In 
+            -- , In 
             , (:*)            -- h :* e,  cons h in front of e
             , (:@)
             -- , In           -- alias for :?
@@ -116,7 +116,7 @@ infixr 5 :@
 
 data (h :: * -> * -> *) :@ s
 
-data Ev (h :: * -> * -> *) s e a = Ev (Marker h e a) (h e a) (Context e)
+data Ev (h :: * -> * -> *) s e a = Ev (Marker h e a) (h e a)
 
 instance Show (Marker h e a) where
   show (Marker i) = show i
@@ -147,27 +147,6 @@ infixr 5 :*
 
 data hs :* e
 
-data Context e where
-  CCons :: !(Ev h s e' ans) -> !(ContextT e e') -> !(Context e) -> Context ((h:@s) :* e)
-  CNil  :: Context ()
-
-data ContextT e e' where
-  CTCons :: !(Ev h s e' ans) -> !(ContextT e e') -> ContextT e ((h:@s) :* e)
-  CTId   :: ContextT e e
-  -- CTComp :: ContextT e'' e' -> ContextT e e'' -> ContextT e e'
-  -- CTFun :: !(Context e -> Context e') -> ContextT e e'
-
--- apply a context transformer
-applyT :: ContextT e e' -> Context e -> Context e'
-applyT (CTCons ev g) ctx = CCons ev g ctx
-applyT (CTId) ctx         = ctx
---applyT (CTComp c1 c2) ctx = applyT c1 (applyT c2 ctx)
---applyT (CTFun f) ctx = f ctx
-
--- the tail of a context
-ctail :: Context (h :* e) -> Context e
-ctail (CCons _ _ ctx)   = ctx
-
 -------------------------------------------------------
 -- The Multi Prompt control monad
 -- ans: the answer type, i.e. the type of the handler/prompt context.
@@ -180,76 +159,63 @@ data Ctl e a = Pure { result :: !a }
                         op     :: !((b -> Eff e' ans) -> Eff e' ans),  -- the final action, just needs the resumption (:: b -> Eff e' ans) to be evaluated.
                         cont   :: !(b -> Eff e a) }                    -- the (partially) build up resumption; (b -> Eff e a) :~: (b -> Eff e' ans)` by the time we reach the prompt
 
-
-newtype Eff e a = Eff { unEff :: Context e -> Ctl e a }
+-- type Eff e a = Ctl e a
+newtype Eff e a = Eff { unEff :: Ctl e a }
 
 {-# INLINE lift #-}
 lift :: Ctl e a -> Eff e a
-lift ctl = Eff (\ctx -> ctl)
+lift = Eff
 
-{-# INLINE ctxMap #-}
-ctxMap :: (Context e' -> Context e) -> Eff e a -> Eff e' a
-ctxMap f eff = Eff (\ctx -> ctxMapCtl f $ unEff eff (f ctx))
-
-ctxMap2 f action = Eff (\ctx -> ctxMapCtl f $ unEff (action ctx) (f ctx))
+-- {-# INLINE ctxMap #-}
+ctxMap :: Eff e a -> Eff e' a
+ctxMap eff = Eff (ctxMapCtl $ unEff eff)
 
 {-# INLINE ctxMapCtl #-}
-ctxMapCtl :: (Context e' -> Context e) -> Ctl e a -> Ctl e' a
-ctxMapCtl f (Pure x) = Pure x
-ctxMapCtl f (Control m op cont) = Control m op (\b -> ctxMap f (cont b))
+ctxMapCtl :: Ctl e a -> Ctl e' a
+ctxMapCtl (Pure x) = Pure x
+ctxMapCtl (Control m op cont) = Control m op (\b -> ctxMap (cont b))
 
 {-# INLINE hideSecond #-}
 hideSecond :: Eff ((h :@ s) :* e) a -> Eff ((h :@ s) :* (h' :@ s') :* e) a
-hideSecond eff = ctxMap (\(CCons ev CTId (CCons ev' g' ctx)) ->
-                             CCons ev (CTCons ev' g') ctx) eff
+hideSecond eff = ctxMap eff
 
-under :: In h s e => Ev h s e' ans -> Eff e' b -> Eff e b
--- under m ctx (Eff eff) = Eff (\_ -> case eff ctx of
---                                        Pure x -> Pure x
---                                        Control n op cont -> Control n op (resumeUnder m ctx cont))
+under :: Ev h s e' ans -> Eff e' b -> Eff e b
+under ev@(Ev m h) (Eff ctl) = Eff (case ctl of
+                                    Pure x -> Pure x
+                                    Control n op cont -> Control n op (resumeUnder ev cont))
 
-under ev@(Ev m h ctx) (Eff eff) = Eff (\_ -> case eff ctx of
-                                              Pure x -> Pure x
-                                              Control n op cont -> Control n op (resumeUnder ev cont))
-
-resumeUnder :: forall h s a b e e' ans. In h s e => Ev h s e' ans -> (b -> Eff e' a) -> (b -> Eff e a)
-resumeUnder ev@(Ev m h ctx) cont x = under ev (cont x)
--- resumeUnder ev = ((.) . (.)) under ev ($)
--- resumeUnder ev@(Ev m h (CCons ev'@(Ev m' h' _) g' ctx')) cont x
---   = case mmatch m m' of
---       Just Refl -> under (Ev m h (applyT g' ctx')) (cont x)
---       Nothing   -> error "EffEv.resumeUnder: marker does not match anymore (this should never happen?)"
-
+resumeUnder :: forall h s a b e e' ans. Ev h s e' ans -> (b -> Eff e' a) -> (b -> Eff e a)
+resumeUnder ev@(Ev m h) cont x = under ev (cont x)
 
 instance Functor (Eff e) where
-  fmap  = liftM
+  fmap f (Eff ctl) = Eff (fmap f ctl)
 instance Applicative (Eff e) where
   pure  = return
   (<*>) = ap
 instance Monad (Eff e) where
-  return x   = Eff (\evv -> Pure x)
+  return x   = Eff (Pure x)
   (>>=)      = bind
 
 -- start yielding (with an initially empty continuation)
 {-# INLINE yield #-}
 yield :: Ev h s e ans -> ((b -> Eff e ans) -> Eff e ans) -> Eff e' b
-yield m op  = Eff (\ctx -> Control m op pure)
+yield m op  = Eff (Control m op pure)
 
 {-# INLINE kcompose #-}
 kcompose :: (b -> Eff e c) -> (a -> Eff e b) -> a -> Eff e c      -- Kleisli composition
 kcompose g f x =
   case f x of
     -- bind (f x) g
-    Eff eff -> Eff (\ctx -> case eff ctx of
-                              Pure x -> unEff (g x) ctx
-                              Control m op cont -> Control m op (g `kcompose` cont))
+    Eff eff -> Eff (case eff of
+                          Pure x -> unEff (g x) 
+                          Control m op cont -> Control m op (g `kcompose` cont))
 
 {-# INLINE bind #-}
 bind :: Eff e a -> (a -> Eff e b) -> Eff e b
 bind (Eff eff) f
-  = Eff (\ctx -> case eff ctx of
-                   Pure x            -> unEff (f x) ctx
-                   Control m op cont -> Control m op (f `kcompose` cont))  -- keep yielding with an extended continuation
+  = Eff (case eff of
+            Pure x            -> unEff (f x)
+            Control m op cont -> Control m op (f `kcompose` cont))  -- keep yielding with an extended continuation
 
 instance Functor (Ctl e) where
   fmap  = liftM
@@ -264,32 +230,32 @@ instance Monad (Ctl e) where
 
 kcompose2 :: (b -> Ctl e c) -> (a -> Eff e b) -> a -> Eff e c
 kcompose2 g f x
-  = Eff $ \ctx -> case unEff (f x) ctx of
+  = Eff $ case unEff (f x) of
         Pure x -> g x
         Control m op cont -> Control m op (g `kcompose2` cont)
 
 
 -- use a prompt with a unique marker (and handle yields to it)
 {-# INLINE prompt #-}
-prompt :: Marker h e ans -> h e ans -> (Ev h s e ans -> Eff ((h :@ s) :* e) ans) -> Eff e ans
-prompt m h action = Eff $ \ctx ->
-  case (unEff (action (Ev m h ctx)) (CCons (Ev m h ctx) CTId ctx)) of                    -- add handler to the context
+prompt :: Marker h e ans -> h e ans -> Eff ((h :@ s) :* e) ans -> Eff e ans
+prompt m h (Eff eff) = Eff $ 
+  case eff of                    -- add handler to the context
     Pure x -> Pure x
-    Control ev@(Ev n h' ctx') op cont ->
-        let cont' x = prompt m h (\_ -> cont x) in      -- extend the continuation with our own prompt
+    Control ev@(Ev n h') op cont ->
+        let cont' x = prompt m h (cont x) in      -- extend the continuation with our own prompt
         case mmatch m n of
           Nothing   -> Control ev op cont'          -- keep yielding (but with the extended continuation)
-          Just Refl -> unEff (op cont') ctx   -- found our prompt, invoke `op` (under the context `ctx`).
+          Just Refl -> unEff (op cont')   -- found our prompt, invoke `op` (under the context `ctx`).
                               -- Note: `Refl` proves `a ~ ans` and `e ~ e'` (the existential `ans,e'` in Control)
 
 {-# INLINE handler #-}
 handler :: h e ans -> (forall s. Ev h s e ans -> Eff ((h :@ s) :* e) ans) -> Eff e ans
 handler h action
-  = freshMarker $ \m -> prompt m h action
+  = freshMarker $ \m -> prompt m h (action (Ev m h))
 
 -- Run a control monad
 runEff :: Eff () a -> a
-runEff (Eff eff) = case eff CNil of
+runEff (Eff eff) = case eff of
                    Pure x -> x
                    Control _ _ _ -> error "Unhandled operation"  -- can never happen
 
@@ -311,42 +277,7 @@ handlerHideRetEff ret h action
 -- | Mask the top effect handler in the give action (i.e. if a operation is performed
 -- on an @h@ effect inside @e@ the top handler is ignored).
 mask :: forall h s e ans. Eff e ans -> Eff ((h :@ s) :* e) ans
-mask eff = ctxMap ctail eff
-
----------------------------------------------------------
---
----------------------------------------------------------
-
--- type h :? e = In h s e
-
-data SubContext (h :: * -> * -> *) s = forall h s e. SubContext !(Context ((h :@ s):* e))
-
--- type In h se = In h se 
-class In (h :: * -> * -> *) s e where
-  subContext :: Context e -> SubContext h s
-
-instance (InEq (HEqual (h :: * -> * -> *) s (h' :: * -> * -> *) s') h s h' s' ctx) => In h s ((h' :@ s') :* ctx)  where
-  subContext = subContextEq
-
-type family HEqual (h :: * -> * -> *) s (h' :: * -> * -> *) s' :: Bool where
-  HEqual h s h s   = 'True
-  HEqual h s h' s' = 'False
-
-class (iseq ~ HEqual (h :: * -> * -> *) s (h' :: * -> * -> *) s') => InEq iseq h s h' s' e  where
-  subContextEq :: Context ((h' :@ s') :* e) -> SubContext h s
-
-instance (h ~ h', s ~ s') => InEq 'True h s h' s' e where
-  subContextEq ctx = SubContext ctx
-
-instance ('False ~ HEqual h s h' s', In h s e) => InEq 'False h s h' s' e where
-  subContextEq ctx = subContext (ctail ctx)
-
-
--- {-# INLINE withSubContext #-}
--- withSubContext :: In h s e => (SubContext h s -> Eff e a) -> Eff e a
--- withSubContext action
---   = do ctx <- Eff Pure
---        action (subContext ctx)
+mask eff = ctxMap eff
 
 
 ------------------------------------
@@ -355,20 +286,14 @@ instance ('False ~ HEqual h s h' s', In h s e) => InEq 'False h s h' s' e where
 
 -- | The abstract type of operations of type @a@ to @b@, for a handler
 -- defined in an effect context @e@ and answer type @ans@.
-data Op a b e ans = Op { applyOp:: !(forall h s e'. In h s e' => Ev h s e ans -> a -> Eff e' b) }
+data Op a b e ans = Op { applyOp:: !(forall h s e'. Ev h s e ans -> a -> Eff e' b) }
 
 
 -- Given evidence and an operation selector, perform the operation
 {-# INLINE perform #-}
--- perform :: In h e => Marker h e' ans' -> (forall e' ans. h e' ans -> Op a b e' ans) -> a -> Eff e b
--- perform a selectOp x
---   = withSubContext $ \(SubContext (CCons b h g ctx)) ->
---       case mmatch a b of
---         Just Refl  -> applyOp (selectOp h) b (applyT g ctx) x
---         Nothing -> error "what to do here"
 
-perform :: In h s e => (forall e' ans. h e' ans -> Op a b e' ans) -> Ev h s e' ans -> a -> Eff e b
-perform selectOp ev@(Ev m h ctx) x = applyOp (selectOp h) ev x
+perform :: (forall e' ans. h e' ans -> Op a b e' ans) -> Ev h s e' ans -> a -> Eff e b
+perform selectOp ev@(Ev m h) x = applyOp (selectOp h) ev x
 
 -- | Create an operation that always resumes with a constant value (of type @a@).
 -- (see also the `perform` example).
@@ -418,7 +343,7 @@ newtype Local a e ans = Local (IORef a)
 -- | Unsafe `IO` in the `Eff` monad.
 {-# INLINE unsafeIO #-}
 unsafeIO :: IO a -> Eff e a
-unsafeIO io = let x = unsafeInlinePrim io in seq x (Eff $ \_ -> Pure x)
+unsafeIO io = let x = unsafeInlinePrim io in seq x (Eff $ Pure x)
 
 -- | Get the value of the local state.
 {-# INLINE lget #-}
@@ -450,10 +375,10 @@ localModify m f = perform lmodify m f
 -- A special prompt that saves and restores state per resumption
 mpromptIORef :: IORef a -> Eff e b -> Eff e b
 mpromptIORef r action
-  = Eff $ \ctx -> case (unEff action ctx) of
+  = Eff $ case unEff action of
       p@(Pure _) -> p
       Control m op cont
-        -> do val <- unEff (unsafeIO (readIORef r)) ctx                     -- save current value on yielding
+        -> do val <- unEff (unsafeIO (readIORef r))                     -- save current value on yielding
               let cont' x = do unsafeIO (writeIORef r val)  -- restore saved value on resume
                                mpromptIORef r (cont x)
               Control m op cont'
@@ -472,7 +397,7 @@ unsafePromptIORef init action
 localRet :: a -> (ans -> a -> b) -> (forall s. Ev (Local a) s e b -> Eff ((Local a :@ s) :* e) ans) -> Eff e b
 localRet init ret action
   = unsafePromptIORef init $ \m r ->  -- set a fresh prompt with marker `m`
-        do x <- ctxMap2 (\ctx -> CCons (Ev m (Local r) ctx) CTId ctx) (\ctx -> (action (Ev m (Local r) ctx))) -- and call action with the extra evidence
+        do x <- ctxMap (action (Ev m (Local r))) -- and call action with the extra evidence
            y <- unsafeIO (readIORef r)
            return (ret x y)
 

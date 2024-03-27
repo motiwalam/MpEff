@@ -4,7 +4,7 @@ cabal-version: 1.12
 --
 -- see: https://github.com/sol/hpack
 --
--- hash: f737ac63f1eae17980dcf5752e6c79d8933921d9c05629fc3a437922c9cd8881
+-- hash: 922090099d81ee75c778eaa14f47887f90a3ee3ed42db80af51acd5c96593df6
 
 name:           mpeff
 version:        0.1.0.0
@@ -32,6 +32,7 @@ library
       Control.Mp.Eff
       Control.Mp.Util
       Example.Basic
+      Example.DecisionTrees
       Example.Nim
       Example.Parser
   other-modules:
