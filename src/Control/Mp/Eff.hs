@@ -60,7 +60,7 @@ module Control.Mp.Eff(
             -- , In 
             , (:*)            -- h :* e,  cons h in front of e
             , (:@)
-            -- , In           -- alias for :?
+            , In           -- alias for :?
 
             , Ev
 
@@ -179,12 +179,12 @@ ctxMapCtl (Control m op cont) = Control m op (\b -> ctxMap (cont b))
 hideSecond :: Eff ((h :@ s) :* e) a -> Eff ((h :@ s) :* (h' :@ s') :* e) a
 hideSecond eff = ctxMap eff
 
-under :: Ev h s e' ans -> Eff e' b -> Eff e b
+under :: In h s e => Ev h s e' ans -> Eff e' b -> Eff e b
 under ev@(Ev m h) (Eff ctl) = Eff (case ctl of
                                     Pure x -> Pure x
                                     Control n op cont -> Control n op (resumeUnder ev cont))
 
-resumeUnder :: forall h s a b e e' ans. Ev h s e' ans -> (b -> Eff e' a) -> (b -> Eff e a)
+resumeUnder :: forall h s a b e e' ans. In h s e => Ev h s e' ans -> (b -> Eff e' a) -> (b -> Eff e a)
 resumeUnder ev@(Ev m h) cont x = under ev (cont x)
 
 instance Functor (Eff e) where
@@ -281,18 +281,46 @@ mask eff = ctxMap eff
 
 
 ------------------------------------
+-- SubContexts
+------------------------------------
+
+-- e = a1, a2, ..., an
+-- In a3
+-- e -> a3, ..., an
+
+data SubContext (h :: * -> * -> *) s -- = forall h s e. SubContext !(Context ((h :@ s) :* e))
+
+-- type In h se = In h se 
+class In (h :: * -> * -> *) s e where
+
+instance (InEq (HEqual (h :: * -> * -> *) s (h' :: * -> * -> *) s') h s h' s' ctx) => In h s ((h' :@ s') :* ctx) where
+
+type family HEqual (h :: * -> * -> *) s (h' :: * -> * -> *) s' :: Bool where
+  HEqual h s h s   = 'True
+  HEqual h s h' s' = 'False
+
+class (iseq ~ HEqual (h :: * -> * -> *) s (h' :: * -> * -> *) s') => InEq iseq h s h' s' e where
+
+instance (h ~ h', s ~ s') => InEq 'True h s h' s' e where
+  -- subContextEq ctx = SubContext ctx
+
+instance ('False ~ HEqual h s h' s', In h s e) => InEq 'False h s h' s' e where
+  -- subContextEq ctx = subContext (ctail ctx)
+
+
+------------------------------------
 -- Operations
 -------------------------------------
 
 -- | The abstract type of operations of type @a@ to @b@, for a handler
 -- defined in an effect context @e@ and answer type @ans@.
-data Op a b e ans = Op { applyOp:: !(forall h s e'. Ev h s e ans -> a -> Eff e' b) }
+data Op a b e ans = Op { applyOp:: !(forall h s e'. In h s e' => Ev h s e ans -> a -> Eff e' b) }
 
 
 -- Given evidence and an operation selector, perform the operation
 {-# INLINE perform #-}
 
-perform :: (forall e' ans. h e' ans -> Op a b e' ans) -> Ev h s e' ans -> a -> Eff e b
+perform :: In h s e => (forall e' ans. h e' ans -> Op a b e' ans) -> Ev h s e' ans -> a -> Eff e b
 perform selectOp ev@(Ev m h) x = applyOp (selectOp h) ev x
 
 -- | Create an operation that always resumes with a constant value (of type @a@).
