@@ -114,9 +114,11 @@ data Marker (h:: * -> * -> *) e a = Marker !Integer
 
 infixr 5 :@
 
+data Un (h :: * -> * -> *)
 data (h :: * -> * -> *) :@ s
 
 data Ev (h :: * -> * -> *) s e a = Ev (Marker h e a) (h e a) (Context e)
+data EvU (h :: * -> * -> *) e a = EvU (Marker h e a) (h e a) (Context e)
 
 instance Show (Marker h e a) where
   show (Marker i) = show i
@@ -149,10 +151,12 @@ data hs :* e
 
 data Context e where
   CCons :: !(Ev h s e' ans) -> !(ContextT e e') -> !(Context e) -> Context ((h:@s) :* e)
+  CConsU :: !(EvU h e' ans) -> !(ContextT e e') -> !(Context e) -> Context (Un h :* e)
   CNil  :: Context ()
 
 data ContextT e e' where
   CTCons :: !(Ev h s e' ans) -> !(ContextT e e') -> ContextT e ((h:@s) :* e)
+  CTConsU :: !(EvU h e' ans) -> !(ContextT e e') -> ContextT e (Un h :* e)
   CTId   :: ContextT e e
   -- CTComp :: ContextT e'' e' -> ContextT e e'' -> ContextT e e'
   -- CTFun :: !(Context e -> Context e') -> ContextT e e'
@@ -203,7 +207,7 @@ hideSecond :: Eff ((h :@ s) :* e) a -> Eff ((h :@ s) :* (h' :@ s') :* e) a
 hideSecond eff = ctxMap (\(CCons ev CTId (CCons ev' g' ctx)) ->
                              CCons ev (CTCons ev' g') ctx) eff
 
-under :: In h s e => Ev h s e' ans -> Eff e' b -> Eff e b
+under :: In (h :@ s) e => Ev h s e' ans -> Eff e' b -> Eff e b
 -- under m ctx (Eff eff) = Eff (\_ -> case eff ctx of
 --                                        Pure x -> Pure x
 --                                        Control n op cont -> Control n op (resumeUnder m ctx cont))
@@ -212,7 +216,7 @@ under ev@(Ev m h ctx) (Eff eff) = Eff (\_ -> case eff ctx of
                                               Pure x -> Pure x
                                               Control n op cont -> Control n op (resumeUnder ev cont))
 
-resumeUnder :: forall h s a b e e' ans. In h s e => Ev h s e' ans -> (b -> Eff e' a) -> (b -> Eff e a)
+resumeUnder :: forall h s a b e e' ans. In (h :@ s) e => Ev h s e' ans -> (b -> Eff e' a) -> (b -> Eff e a)
 resumeUnder ev@(Ev m h ctx) cont x = under ev (cont x)
 -- resumeUnder ev = ((.) . (.)) under ev ($)
 -- resumeUnder ev@(Ev m h (CCons ev'@(Ev m' h' _) g' ctx')) cont x
@@ -319,13 +323,14 @@ mask eff = ctxMap ctail eff
 
 -- type h :? e = In h s e
 
-data SubContext (h :: * -> * -> *) s = forall h s e. SubContext !(Context ((h :@ s):* e))
+data SubContext h = forall h e. SubContext !(Context (h :* e))
 
 -- type In h se = In h se 
-class In (h :: * -> * -> *) s e where
-  subContext :: Context e -> SubContext h s
+class In h e where
+  subContext :: Context e -> SubContext h
 
-instance (InEq (HEqual (h :: * -> * -> *) s (h' :: * -> * -> *) s') h s h' s' ctx) => In h s ((h' :@ s') :* ctx)  where
+-- In constraints for named handlers
+instance (InEq (HEqual (h :: * -> * -> *) s (h' :: * -> * -> *) s') h s h' s' ctx) => In (h :@ s) ((h' :@ s') :* ctx)  where
   subContext = subContextEq
 
 type family HEqual (h :: * -> * -> *) s (h' :: * -> * -> *) s' :: Bool where
@@ -333,13 +338,15 @@ type family HEqual (h :: * -> * -> *) s (h' :: * -> * -> *) s' :: Bool where
   HEqual h s h' s' = 'False
 
 class (iseq ~ HEqual (h :: * -> * -> *) s (h' :: * -> * -> *) s') => InEq iseq h s h' s' e  where
-  subContextEq :: Context ((h' :@ s') :* e) -> SubContext h s
+  subContextEq :: Context ((h' :@ s') :* e) -> SubContext (h :@ s)
 
 instance (h ~ h', s ~ s') => InEq 'True h s h' s' e where
   subContextEq ctx = SubContext ctx
 
-instance ('False ~ HEqual h s h' s', In h s e) => InEq 'False h s h' s' e where
+instance ('False ~ HEqual h s h' s', In (h :@ s) e) => InEq 'False h s h' s' e where
   subContextEq ctx = subContext (ctail ctx)
+
+
 
 
 -- {-# INLINE withSubContext #-}
@@ -355,7 +362,7 @@ instance ('False ~ HEqual h s h' s', In h s e) => InEq 'False h s h' s' e where
 
 -- | The abstract type of operations of type @a@ to @b@, for a handler
 -- defined in an effect context @e@ and answer type @ans@.
-data Op a b e ans = Op { applyOp:: !(forall h s e'. In h s e' => Ev h s e ans -> a -> Eff e' b) }
+data Op a b e ans = Op { applyOp:: !(forall h s e'. In (h :@ s) e' => Ev h s e ans -> a -> Eff e' b) }
 
 
 -- Given evidence and an operation selector, perform the operation
@@ -367,7 +374,7 @@ data Op a b e ans = Op { applyOp:: !(forall h s e'. In h s e' => Ev h s e ans ->
 --         Just Refl  -> applyOp (selectOp h) b (applyT g ctx) x
 --         Nothing -> error "what to do here"
 
-perform :: In h s e => (forall e' ans. h e' ans -> Op a b e' ans) -> Ev h s e' ans -> a -> Eff e b
+perform :: In (h :@ s) e => (forall e' ans. h e' ans -> Op a b e' ans) -> Ev h s e' ans -> a -> Eff e b
 perform selectOp ev@(Ev m h ctx) x = applyOp (selectOp h) ev x
 
 -- | Create an operation that always resumes with a constant value (of type @a@).
