@@ -207,6 +207,7 @@ hideSecond :: Eff ((h :@ s) :* e) a -> Eff ((h :@ s) :* (h' :@ s') :* e) a
 hideSecond eff = ctxMap (\(CCons ev CTId (CCons ev' g' ctx)) ->
                              CCons ev (CTCons ev' g') ctx) eff
 
+-- In (f h) e
 under :: In (h :@ s) e => Ev h s e' ans -> Eff e' b -> Eff e b
 -- under m ctx (Eff eff) = Eff (\_ -> case eff ctx of
 --                                        Pure x -> Pure x
@@ -325,7 +326,7 @@ mask eff = ctxMap ctail eff
 
 data SubContext h = forall h e. SubContext !(Context (h :* e))
 
--- type In h se = In h se 
+-- type In h e = In h e 
 class In h e where
   subContext :: Context e -> SubContext h
 
@@ -346,6 +347,26 @@ instance (h ~ h', s ~ s') => InEq 'True h s h' s' e where
 instance ('False ~ HEqual h s h' s', In (h :@ s) e) => InEq 'False h s h' s' e where
   subContextEq ctx = subContext (ctail ctx)
 
+-- In constraints for unnamed handlers
+
+instance (InEqU (HEqualU h h') h h' ctx) => In (Un h) (Un h' :* ctx)  where
+  subContext = subContextEqU
+
+-- instance (In (Un h) ctx) => In (Un h) (h' :* ctx)  where
+--   subContext = subContextEqU
+
+type family HEqualU (h :: * -> * -> *) (h' :: * -> * -> *) :: Bool where
+  HEqualU h h  = 'True
+  HEqualU h h' = 'False
+
+class (iseq ~ HEqualU (h :: * -> * -> *) (h' :: * -> * -> *)) => InEqU iseq h h' e  where
+  subContextEqU :: Context (Un h' :* e) -> SubContext (Un h)
+
+instance (h ~ h') => InEqU 'True h h' e where
+  subContextEqU ctx = SubContext ctx
+
+instance ('False ~ HEqualU h h', In (Un h) e) => InEqU 'False h h' e where
+  subContextEqU ctx = subContext (ctail ctx)
 
 
 
@@ -362,6 +383,8 @@ instance ('False ~ HEqual h s h' s', In (h :@ s) e) => InEq 'False h s h' s' e w
 
 -- | The abstract type of operations of type @a@ to @b@, for a handler
 -- defined in an effect context @e@ and answer type @ans@.
+-- In (f h) e => Marker h e a
+-- f = Un or (:@ s)
 data Op a b e ans = Op { applyOp:: !(forall h s e'. In (h :@ s) e' => Ev h s e ans -> a -> Eff e' b) }
 
 
